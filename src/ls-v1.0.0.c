@@ -7,26 +7,26 @@
 *       % lsv1.0.0  /home
 *       $ lsv1.0.0  /home/kali/   /etc/
 */
+#define _DEFAULT_SOURCE
+
 #include <stdio.h>
-#include <pwd.h>
-#include <grp.h>
-#include <time.h>
-#include <getopt.h>
 #include <stdlib.h>
 #include <unistd.h>
 #include <dirent.h>
 #include <string.h>
 #include <errno.h>
 #include <sys/stat.h>
-
-extern int errno;
+#include <sys/ioctl.h>
+#include <pwd.h>
+#include <grp.h>
+#include <time.h>
 
 int long_listing = 0;
 
 void do_ls(const char *dir);
-
 void get_permissions(mode_t mode, char permissions[11]);
-
+int get_terminal_width(void);
+void print_columns(char **filenames, size_t count, size_t max_length);
 
 int main(int argc, char *argv[])
 {
@@ -55,16 +55,28 @@ int main(int argc, char *argv[])
     {
         for (int i = optind; i < argc; i++)
         {
-            printf("Directory listing of %s : \n", argv[i]);
+            if (argc - optind > 1)
+                printf("Directory listing of %s:\n", argv[i]);
+
             do_ls(argv[i]);
-            puts("");
         }
     }
 
     return 0;
 }
 
+int get_terminal_width(void)
+{
+    struct winsize ws;
 
+    if (ioctl(STDOUT_FILENO, TIOCGWINSZ, &ws) == 0 &&
+        ws.ws_col > 0)
+    {
+        return ws.ws_col;
+    }
+
+    return 80;
+}
 
 void get_permissions(mode_t mode, char permissions[11])
 {
@@ -83,7 +95,6 @@ void get_permissions(mode_t mode, char permissions[11])
     permissions[8] = (mode & S_IWOTH) ? 'w' : '-';
     permissions[9] = (mode & S_IXOTH) ? 'x' : '-';
 
-    /* Handle special permission bits */
     if (mode & S_ISUID)
         permissions[3] = (mode & S_IXUSR) ? 's' : 'S';
 
@@ -96,11 +107,42 @@ void get_permissions(mode_t mode, char permissions[11])
     permissions[10] = '\0';
 }
 
+void print_columns(char **filenames, size_t count, size_t max_length)
+{
+    if (count == 0)
+        return;
 
+    size_t column_width = max_length + 2;
+    size_t terminal_width = (size_t)get_terminal_width();
+
+    size_t columns = terminal_width / column_width;
+
+    if (columns == 0)
+        columns = 1;
+
+    if (columns > count)
+        columns = count;
+
+    size_t rows = (count + columns - 1) / columns;
+
+    for (size_t row = 0; row < rows; row++)
+    {
+        for (size_t col = 0; col < columns; col++)
+        {
+            size_t index = col * rows + row;
+
+            if (index < count)
+            {
+                printf("%-*s", (int)column_width, filenames[index]);
+            }
+        }
+
+        putchar('\n');
+    }
+}
 
 void do_ls(const char *dir)
 {
-    struct dirent *entry;
     DIR *dp = opendir(dir);
 
     if (dp == NULL)
@@ -109,45 +151,112 @@ void do_ls(const char *dir)
         return;
     }
 
-    errno = 0;
+    size_t capacity = 10;
+    size_t count = 0;
+    size_t max_length = 0;
 
-    while ((entry = readdir(dp)) != NULL)
+    char **filenames = malloc(capacity * sizeof(*filenames));
+
+    if (filenames == NULL)
     {
+        perror("malloc");
+        closedir(dp);
+        return;
+    }
+
+    struct dirent *entry;
+    int read_error = 0;
+
+    while (1)
+    {
+        errno = 0;
+        entry = readdir(dp);
+
+        if (entry == NULL)
+        {
+            if (errno != 0)
+            {
+                perror("readdir");
+                read_error = 1;
+            }
+            break;
+        }
+
         if (entry->d_name[0] == '.')
             continue;
 
-        if (long_listing)
+        if (count == capacity)
         {
+            size_t new_capacity = capacity * 2;
+            char **temp = realloc(
+                filenames, new_capacity * sizeof(*filenames));
+
+            if (temp == NULL)
+            {
+                perror("realloc");
+                read_error = 1;
+                break;
+            }
+
+            filenames = temp;
+            capacity = new_capacity;
+        }
+
+        char *name = strdup(entry->d_name);
+
+        if (name == NULL)
+        {
+            perror("strdup");
+            read_error = 1;
+            break;
+        }
+
+        filenames[count++] = name;
+
+        size_t length = strlen(name);
+
+        if (length > max_length)
+            max_length = length;
+    }
+
+    closedir(dp);
+
+    if (long_listing)
+    {
+        for (size_t i = 0; i < count; i++)
+        {
+            char path[4096];
             struct stat info;
             char permissions[11];
 
-            char path[4096];
-            snprintf(path, sizeof(path), "%s/%s",
-                     dir, entry->d_name);
+            int path_length = snprintf(
+                path, sizeof(path), "%s/%s", dir, filenames[i]);
 
-            if (stat(path, &info) == -1)
+            if (path_length < 0 ||
+                (size_t)path_length >= sizeof(path))
+            {
+                fprintf(stderr, "Path too long: %s\n", filenames[i]);
+                continue;
+            }
+
+            if (lstat(path, &info) == -1)
             {
                 perror(path);
                 continue;
             }
 
-            
-            struct passwd *owner = getpwuid(info.st_uid);get_permissions(info.st_mode, permissions);
-
-            printf("%s %s\n", permissions, entry->d_name);
+            struct passwd *owner = getpwuid(info.st_uid);
             struct group *group = getgrgid(info.st_gid);
 
-            char time_buffer[32];
-            struct tm *time_info = localtime(&info.st_mtime);
+            char *time_string = ctime(&info.st_mtime);
 
-            if (time_info != NULL)
+            if (time_string != NULL)
             {
-                strftime(time_buffer, sizeof(time_buffer),
-                         "%b %d %H:%M", time_info);
+                time_string[strcspn(time_string, "\n")] = '\0';
             }
             else
             {
-                snprintf(time_buffer, sizeof(time_buffer), "Unknown");
+                time_string = "Unknown";
             }
 
             get_permissions(info.st_mode, permissions);
@@ -158,18 +267,20 @@ void do_ls(const char *dir)
                    owner ? owner->pw_name : "unknown",
                    group ? group->gr_name : "unknown",
                    (long)info.st_size,
-                   time_buffer,
-                   entry->d_name);
+                   time_string,
+                   filenames[i]);
+        }
+    }
+    else
+    {
+        print_columns(filenames, count, max_length);
+    }
 
-                    }
-                    else
-                    {
-                        printf("%s\n", entry->d_name);
-                    }
-                }
+    for (size_t i = 0; i < count; i++)
+        free(filenames[i]);
 
-    if (errno != 0)
-        perror("readdir failed");
+    free(filenames);
 
-    closedir(dp);
+    if (read_error)
+        fprintf(stderr, "Warning: listing may be incomplete.\n");
 }
