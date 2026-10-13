@@ -8,6 +8,7 @@
 *       $ lsv1.0.0  /home/kali/   /etc/
 */
 
+
 #define _DEFAULT_SOURCE
 
 #include <stdio.h>
@@ -22,18 +23,25 @@
 #include <grp.h>
 #include <time.h>
 
+#define COLOR_RESET "\033[0m"
+#define COLOR_BLUE  "\033[1;34m"
+#define COLOR_GREEN "\033[1;32m"
+#define COLOR_CYAN  "\033[1;36m"
+
 int long_listing = 0;
 int horizontal_listing = 0;
 
 void do_ls(const char *dir);
 void get_permissions(mode_t mode, char permissions[11]);
 int get_terminal_width(void);
-
-void print_columns(char **filenames, size_t count,
-                   size_t max_length);
-void print_horizontal(char **filenames, size_t count,
-                      size_t max_length);
 int compare_filenames(const void *a, const void *b);
+const char *get_file_color(const char *dir, const char *name);
+void print_colored_name(const char *dir, const char *name);
+
+void print_columns(const char *dir, char **filenames,
+                   size_t count, size_t max_length);
+void print_horizontal(const char *dir, char **filenames,
+                      size_t count, size_t max_length);
 
 int main(int argc, char *argv[])
 {
@@ -92,7 +100,6 @@ int get_terminal_width(void)
     return 80;
 }
 
-/* Compare two filenames alphabetically */
 int compare_filenames(const void *a, const void *b)
 {
     const char *name_a = *(const char * const *)a;
@@ -109,30 +116,57 @@ void get_permissions(mode_t mode, char permissions[11])
     permissions[1] = (mode & S_IRUSR) ? 'r' : '-';
     permissions[2] = (mode & S_IWUSR) ? 'w' : '-';
     permissions[3] = (mode & S_IXUSR) ? 'x' : '-';
-
     permissions[4] = (mode & S_IRGRP) ? 'r' : '-';
     permissions[5] = (mode & S_IWGRP) ? 'w' : '-';
     permissions[6] = (mode & S_IXGRP) ? 'x' : '-';
-
     permissions[7] = (mode & S_IROTH) ? 'r' : '-';
     permissions[8] = (mode & S_IWOTH) ? 'w' : '-';
     permissions[9] = (mode & S_IXOTH) ? 'x' : '-';
 
     if (mode & S_ISUID)
         permissions[3] = (mode & S_IXUSR) ? 's' : 'S';
-
     if (mode & S_ISGID)
         permissions[6] = (mode & S_IXGRP) ? 's' : 'S';
-
     if (mode & S_ISVTX)
         permissions[9] = (mode & S_IXOTH) ? 't' : 'T';
 
     permissions[10] = '\0';
 }
 
-/* Default display: down then across */
-void print_columns(char **filenames, size_t count,
-                   size_t max_length)
+const char *get_file_color(const char *dir, const char *name)
+{
+    char path[4096];
+    struct stat info;
+
+    int length = snprintf(path, sizeof(path), "%s/%s", dir, name);
+
+    if (length < 0 || (size_t)length >= sizeof(path))
+        return COLOR_RESET;
+
+    if (lstat(path, &info) == -1)
+        return COLOR_RESET;
+
+    if (S_ISDIR(info.st_mode))
+        return COLOR_BLUE;
+
+    if (S_ISLNK(info.st_mode))
+        return COLOR_CYAN;
+
+    if (info.st_mode & (S_IXUSR | S_IXGRP | S_IXOTH))
+        return COLOR_GREEN;
+
+    return COLOR_RESET;
+}
+
+void print_colored_name(const char *dir, const char *name)
+{
+    printf("%s%s%s", get_file_color(dir, name),
+           name, COLOR_RESET);
+}
+
+/* Default mode: down then across */
+void print_columns(const char *dir, char **filenames,
+                   size_t count, size_t max_length)
 {
     if (count == 0)
         return;
@@ -143,7 +177,6 @@ void print_columns(char **filenames, size_t count,
 
     if (columns == 0)
         columns = 1;
-
     if (columns > count)
         columns = count;
 
@@ -156,17 +189,22 @@ void print_columns(char **filenames, size_t count,
             size_t index = col * rows + row;
 
             if (index < count)
-                printf("%-*s", (int)column_width,
-                       filenames[index]);
-        }
+            {
+                print_colored_name(dir, filenames[index]);
 
+                size_t padding =
+                    column_width - strlen(filenames[index]);
+
+                printf("%*s", (int)padding, "");
+            }
+        }
         putchar('\n');
     }
 }
 
-/* -x display: left to right */
-void print_horizontal(char **filenames, size_t count,
-                      size_t max_length)
+/* -x mode: left to right, wrapping at terminal width */
+void print_horizontal(const char *dir, char **filenames,
+                      size_t count, size_t max_length)
 {
     if (count == 0)
         return;
@@ -184,7 +222,11 @@ void print_horizontal(char **filenames, size_t count,
             current_position = 0;
         }
 
-        printf("%-*s", (int)column_width, filenames[i]);
+        print_colored_name(dir, filenames[i]);
+
+        size_t padding = column_width - strlen(filenames[i]);
+        printf("%*s", (int)padding, "");
+
         current_position += column_width;
     }
 
@@ -265,16 +307,13 @@ void do_ls(const char *dir)
         filenames[count++] = name;
 
         size_t length = strlen(name);
-
         if (length > max_length)
             max_length = length;
     }
 
     closedir(dp);
 
-    /* Sort filenames before displaying them */
-    qsort(filenames, count, sizeof(*filenames),
-          compare_filenames);
+    qsort(filenames, count, sizeof(*filenames), compare_filenames);
 
     if (long_listing)
     {
@@ -284,14 +323,12 @@ void do_ls(const char *dir)
             struct stat info;
             char permissions[11];
 
-            int path_length = snprintf(
-                path, sizeof(path), "%s/%s", dir, filenames[i]);
+            int length = snprintf(path, sizeof(path), "%s/%s",
+                                  dir, filenames[i]);
 
-            if (path_length < 0 ||
-                (size_t)path_length >= sizeof(path))
+            if (length < 0 || (size_t)length >= sizeof(path))
             {
-                fprintf(stderr, "Path too long: %s\n",
-                        filenames[i]);
+                fprintf(stderr, "Path too long: %s\n", filenames[i]);
                 continue;
             }
 
@@ -303,32 +340,37 @@ void do_ls(const char *dir)
 
             struct passwd *owner = getpwuid(info.st_uid);
             struct group *group = getgrgid(info.st_gid);
-            char *time_string = ctime(&info.st_mtime);
 
-            if (time_string != NULL)
-                time_string[strcspn(time_string, "\n")] = '\0';
+            char time_buffer[32];
+            struct tm *tm_info = localtime(&info.st_mtime);
+
+            if (tm_info != NULL)
+                strftime(time_buffer, sizeof(time_buffer),
+                         "%b %d %H:%M", tm_info);
             else
-                time_string = "Unknown";
+                snprintf(time_buffer, sizeof(time_buffer), "Unknown");
 
             get_permissions(info.st_mode, permissions);
 
-            printf("%s %2lu %-8s %-8s %8ld %s %s\n",
+            printf("%s %2lu %-8s %-8s %8ld %s ",
                    permissions,
                    (unsigned long)info.st_nlink,
                    owner ? owner->pw_name : "unknown",
                    group ? group->gr_name : "unknown",
                    (long)info.st_size,
-                   time_string,
-                   filenames[i]);
+                   time_buffer);
+
+            print_colored_name(dir, filenames[i]);
+            putchar('\n');
         }
     }
     else if (horizontal_listing)
     {
-        print_horizontal(filenames, count, max_length);
+        print_horizontal(dir, filenames, count, max_length);
     }
     else
     {
-        print_columns(filenames, count, max_length);
+        print_columns(dir, filenames, count, max_length);
     }
 
     for (size_t i = 0; i < count; i++)
