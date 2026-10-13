@@ -28,8 +28,11 @@
 #define COLOR_GREEN "\033[1;32m"
 #define COLOR_CYAN  "\033[1;36m"
 
+#define PATH_SIZE 4096
+
 int long_listing = 0;
 int horizontal_listing = 0;
+int recursive_flag = 0;
 
 void do_ls(const char *dir);
 void get_permissions(mode_t mode, char permissions[11]);
@@ -37,7 +40,6 @@ int get_terminal_width(void);
 int compare_filenames(const void *a, const void *b);
 const char *get_file_color(const char *dir, const char *name);
 void print_colored_name(const char *dir, const char *name);
-
 void print_columns(const char *dir, char **filenames,
                    size_t count, size_t max_length);
 void print_horizontal(const char *dir, char **filenames,
@@ -47,19 +49,24 @@ int main(int argc, char *argv[])
 {
     int option;
 
-    while ((option = getopt(argc, argv, "lx")) != -1)
+    while ((option = getopt(argc, argv, "lxR")) != -1)
     {
         switch (option)
         {
             case 'l':
                 long_listing = 1;
                 break;
+
             case 'x':
                 horizontal_listing = 1;
                 break;
+
+            case 'R':
+                recursive_flag = 1;
+                break;
+
             default:
-                fprintf(stderr,
-                        "Usage: %s [-l] [-x] [directory ...]\n",
+                fprintf(stderr, "Usage: %s [-l] [-x] [-R] [directory ...]\n",
                         argv[0]);
                 return 1;
         }
@@ -79,10 +86,13 @@ int main(int argc, char *argv[])
     {
         for (int i = optind; i < argc; i++)
         {
-            if (argc - optind > 1)
-                printf("Directory listing of %s:\n", argv[i]);
+            if (recursive_flag || argc - optind > 1)
+                printf("%s:\n", argv[i]);
 
             do_ls(argv[i]);
+
+            if (i < argc - 1)
+                putchar('\n');
         }
     }
 
@@ -125,8 +135,10 @@ void get_permissions(mode_t mode, char permissions[11])
 
     if (mode & S_ISUID)
         permissions[3] = (mode & S_IXUSR) ? 's' : 'S';
+
     if (mode & S_ISGID)
         permissions[6] = (mode & S_IXGRP) ? 's' : 'S';
+
     if (mode & S_ISVTX)
         permissions[9] = (mode & S_IXOTH) ? 't' : 'T';
 
@@ -135,7 +147,7 @@ void get_permissions(mode_t mode, char permissions[11])
 
 const char *get_file_color(const char *dir, const char *name)
 {
-    char path[4096];
+    char path[PATH_SIZE];
     struct stat info;
 
     int length = snprintf(path, sizeof(path), "%s/%s", dir, name);
@@ -164,7 +176,6 @@ void print_colored_name(const char *dir, const char *name)
            name, COLOR_RESET);
 }
 
-/* Default mode: down then across */
 void print_columns(const char *dir, char **filenames,
                    size_t count, size_t max_length)
 {
@@ -177,6 +188,7 @@ void print_columns(const char *dir, char **filenames,
 
     if (columns == 0)
         columns = 1;
+
     if (columns > count)
         columns = count;
 
@@ -198,11 +210,11 @@ void print_columns(const char *dir, char **filenames,
                 printf("%*s", (int)padding, "");
             }
         }
+
         putchar('\n');
     }
 }
 
-/* -x mode: left to right, wrapping at terminal width */
 void print_horizontal(const char *dir, char **filenames,
                       size_t count, size_t max_length)
 {
@@ -239,9 +251,13 @@ void do_ls(const char *dir)
 
     if (dp == NULL)
     {
-        fprintf(stderr, "Cannot open directory: %s\n", dir);
+        fprintf(stderr, "Cannot open directory: %s: %s\n",
+                dir, strerror(errno));
         return;
     }
+
+    if (recursive_flag)
+        printf("%s:\n", dir);
 
     size_t capacity = 10;
     size_t count = 0;
@@ -274,13 +290,13 @@ void do_ls(const char *dir)
             break;
         }
 
-        /* Hidden files remain excluded */
         if (entry->d_name[0] == '.')
             continue;
 
         if (count == capacity)
         {
             size_t new_capacity = capacity * 2;
+
             char **temp = realloc(
                 filenames, new_capacity * sizeof(*filenames));
 
@@ -307,6 +323,7 @@ void do_ls(const char *dir)
         filenames[count++] = name;
 
         size_t length = strlen(name);
+
         if (length > max_length)
             max_length = length;
     }
@@ -315,11 +332,14 @@ void do_ls(const char *dir)
 
     qsort(filenames, count, sizeof(*filenames), compare_filenames);
 
+    if (recursive_flag || long_listing)
+        putchar('\n');
+
     if (long_listing)
     {
         for (size_t i = 0; i < count; i++)
         {
-            char path[4096];
+            char path[PATH_SIZE];
             struct stat info;
             char permissions[11];
 
@@ -353,12 +373,10 @@ void do_ls(const char *dir)
             get_permissions(info.st_mode, permissions);
 
             printf("%s %2lu %-8s %-8s %8ld %s ",
-                   permissions,
-                   (unsigned long)info.st_nlink,
+                   permissions, (unsigned long)info.st_nlink,
                    owner ? owner->pw_name : "unknown",
                    group ? group->gr_name : "unknown",
-                   (long)info.st_size,
-                   time_buffer);
+                   (long)info.st_size, time_buffer);
 
             print_colored_name(dir, filenames[i]);
             putchar('\n');
@@ -371,6 +389,40 @@ void do_ls(const char *dir)
     else
     {
         print_columns(dir, filenames, count, max_length);
+    }
+
+    /*
+     * Recurse only after displaying the current directory.
+     * lstat prevents symbolic links to directories from being followed.
+     */
+    if (recursive_flag)
+    {
+        for (size_t i = 0; i < count; i++)
+        {
+            char path[PATH_SIZE];
+            struct stat info;
+
+            int length = snprintf(path, sizeof(path), "%s/%s",
+                                  dir, filenames[i]);
+
+            if (length < 0 || (size_t)length >= sizeof(path))
+            {
+                fprintf(stderr, "Path too long: %s\n", filenames[i]);
+                continue;
+            }
+
+            if (lstat(path, &info) == -1)
+            {
+                perror(path);
+                continue;
+            }
+
+            if (S_ISDIR(info.st_mode))
+            {
+                putchar('\n');
+                do_ls(path);
+            }
+        }
     }
 
     for (size_t i = 0; i < count; i++)
