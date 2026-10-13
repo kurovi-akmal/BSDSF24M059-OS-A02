@@ -7,6 +7,7 @@
 *       % lsv1.0.0  /home
 *       $ lsv1.0.0  /home/kali/   /etc/
 */
+
 #define _DEFAULT_SOURCE
 
 #include <stdio.h>
@@ -30,9 +31,9 @@ int get_terminal_width(void);
 
 void print_columns(char **filenames, size_t count,
                    size_t max_length);
-
 void print_horizontal(char **filenames, size_t count,
                       size_t max_length);
+int compare_filenames(const void *a, const void *b);
 
 int main(int argc, char *argv[])
 {
@@ -45,13 +46,12 @@ int main(int argc, char *argv[])
             case 'l':
                 long_listing = 1;
                 break;
-
             case 'x':
                 horizontal_listing = 1;
                 break;
-
             default:
-                fprintf(stderr, "Usage: %s [-l] [-x] [directory ...]\n",
+                fprintf(stderr,
+                        "Usage: %s [-l] [-x] [directory ...]\n",
                         argv[0]);
                 return 1;
         }
@@ -87,11 +87,18 @@ int get_terminal_width(void)
 
     if (ioctl(STDOUT_FILENO, TIOCGWINSZ, &ws) == 0 &&
         ws.ws_col > 0)
-    {
         return ws.ws_col;
-    }
 
     return 80;
+}
+
+/* Compare two filenames alphabetically */
+int compare_filenames(const void *a, const void *b)
+{
+    const char *name_a = *(const char * const *)a;
+    const char *name_b = *(const char * const *)b;
+
+    return strcmp(name_a, name_b);
 }
 
 void get_permissions(mode_t mode, char permissions[11])
@@ -132,7 +139,6 @@ void print_columns(char **filenames, size_t count,
 
     size_t column_width = max_length + 2;
     size_t terminal_width = (size_t)get_terminal_width();
-
     size_t columns = terminal_width / column_width;
 
     if (columns == 0)
@@ -150,14 +156,15 @@ void print_columns(char **filenames, size_t count,
             size_t index = col * rows + row;
 
             if (index < count)
-                printf("%-*s", (int)column_width, filenames[index]);
+                printf("%-*s", (int)column_width,
+                       filenames[index]);
         }
 
         putchar('\n');
     }
 }
 
-/* -x display: left to right, wrapping at terminal width */
+/* -x display: left to right */
 void print_horizontal(char **filenames, size_t count,
                       size_t max_length)
 {
@@ -222,18 +229,16 @@ void do_ls(const char *dir)
                 perror("readdir");
                 read_error = 1;
             }
-
             break;
         }
 
-        /* Preserve the starter program's hidden-file behavior. */
+        /* Hidden files remain excluded */
         if (entry->d_name[0] == '.')
             continue;
 
         if (count == capacity)
         {
             size_t new_capacity = capacity * 2;
-
             char **temp = realloc(
                 filenames, new_capacity * sizeof(*filenames));
 
@@ -267,6 +272,10 @@ void do_ls(const char *dir)
 
     closedir(dp);
 
+    /* Sort filenames before displaying them */
+    qsort(filenames, count, sizeof(*filenames),
+          compare_filenames);
+
     if (long_listing)
     {
         for (size_t i = 0; i < count; i++)
@@ -281,7 +290,8 @@ void do_ls(const char *dir)
             if (path_length < 0 ||
                 (size_t)path_length >= sizeof(path))
             {
-                fprintf(stderr, "Path too long: %s\n", filenames[i]);
+                fprintf(stderr, "Path too long: %s\n",
+                        filenames[i]);
                 continue;
             }
 
