@@ -22,17 +22,23 @@
 #include <time.h>
 
 int long_listing = 0;
+int horizontal_listing = 0;
 
 void do_ls(const char *dir);
 void get_permissions(mode_t mode, char permissions[11]);
 int get_terminal_width(void);
-void print_columns(char **filenames, size_t count, size_t max_length);
+
+void print_columns(char **filenames, size_t count,
+                   size_t max_length);
+
+void print_horizontal(char **filenames, size_t count,
+                      size_t max_length);
 
 int main(int argc, char *argv[])
 {
     int option;
 
-    while ((option = getopt(argc, argv, "l")) != -1)
+    while ((option = getopt(argc, argv, "lx")) != -1)
     {
         switch (option)
         {
@@ -40,11 +46,21 @@ int main(int argc, char *argv[])
                 long_listing = 1;
                 break;
 
+            case 'x':
+                horizontal_listing = 1;
+                break;
+
             default:
-                fprintf(stderr, "Usage: %s [-l] [directory ...]\n",
+                fprintf(stderr, "Usage: %s [-l] [-x] [directory ...]\n",
                         argv[0]);
                 return 1;
         }
+    }
+
+    if (long_listing && horizontal_listing)
+    {
+        fprintf(stderr, "Use either -l or -x, not both.\n");
+        return 1;
     }
 
     if (optind == argc)
@@ -107,7 +123,9 @@ void get_permissions(mode_t mode, char permissions[11])
     permissions[10] = '\0';
 }
 
-void print_columns(char **filenames, size_t count, size_t max_length)
+/* Default display: down then across */
+void print_columns(char **filenames, size_t count,
+                   size_t max_length)
 {
     if (count == 0)
         return;
@@ -132,13 +150,38 @@ void print_columns(char **filenames, size_t count, size_t max_length)
             size_t index = col * rows + row;
 
             if (index < count)
-            {
                 printf("%-*s", (int)column_width, filenames[index]);
-            }
         }
 
         putchar('\n');
     }
+}
+
+/* -x display: left to right, wrapping at terminal width */
+void print_horizontal(char **filenames, size_t count,
+                      size_t max_length)
+{
+    if (count == 0)
+        return;
+
+    size_t column_width = max_length + 2;
+    size_t terminal_width = (size_t)get_terminal_width();
+    size_t current_position = 0;
+
+    for (size_t i = 0; i < count; i++)
+    {
+        if (current_position > 0 &&
+            current_position + column_width > terminal_width)
+        {
+            putchar('\n');
+            current_position = 0;
+        }
+
+        printf("%-*s", (int)column_width, filenames[i]);
+        current_position += column_width;
+    }
+
+    putchar('\n');
 }
 
 void do_ls(const char *dir)
@@ -179,15 +222,18 @@ void do_ls(const char *dir)
                 perror("readdir");
                 read_error = 1;
             }
+
             break;
         }
 
+        /* Preserve the starter program's hidden-file behavior. */
         if (entry->d_name[0] == '.')
             continue;
 
         if (count == capacity)
         {
             size_t new_capacity = capacity * 2;
+
             char **temp = realloc(
                 filenames, new_capacity * sizeof(*filenames));
 
@@ -247,17 +293,12 @@ void do_ls(const char *dir)
 
             struct passwd *owner = getpwuid(info.st_uid);
             struct group *group = getgrgid(info.st_gid);
-
             char *time_string = ctime(&info.st_mtime);
 
             if (time_string != NULL)
-            {
                 time_string[strcspn(time_string, "\n")] = '\0';
-            }
             else
-            {
                 time_string = "Unknown";
-            }
 
             get_permissions(info.st_mode, permissions);
 
@@ -270,6 +311,10 @@ void do_ls(const char *dir)
                    time_string,
                    filenames[i]);
         }
+    }
+    else if (horizontal_listing)
+    {
+        print_horizontal(filenames, count, max_length);
     }
     else
     {
